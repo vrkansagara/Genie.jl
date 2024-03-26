@@ -7,6 +7,7 @@ using HTTP, Sockets, HTTP.WebSockets
 import Millboard, Distributed, Logging
 import Genie
 import Distributed
+import HTTP.Servers: Listener, forceclose
 
 
 """
@@ -15,8 +16,8 @@ import Distributed
 Represents a object containing references to Genie's web and websockets servers.
 """
 Base.@kwdef mutable struct ServersCollection
-  webserver::Union{Task,Nothing} = nothing
-  websockets::Union{Task,Nothing} = nothing
+  webserver::Union{T,Nothing} where T <: HTTP.Server = nothing
+  websockets::Union{T,Nothing} where T <: HTTP.Server = nothing
 end
 
 """
@@ -77,6 +78,8 @@ function up(port::Int,
             open_browser::Bool = false,
             reuseaddr::Bool = Distributed.nworkers() > 1,
             updateconfig::Bool = true,
+            protocol::String = "http",
+            query::Dict = Dict(),
             http_kwargs...) :: ServersCollection
 
   if server !== nothing
@@ -99,7 +102,7 @@ function up(port::Int,
   if Genie.config.websockets_server !== nothing && port !== ws_port
     print_server_status("Web Sockets server starting at $host:$ws_port")
 
-    new_server.websockets = @async HTTP.listen(host, ws_port; verbose = verbose, rate_limit = ratelimit, server = wsserver,
+    new_server.websockets = HTTP.listen!(host, ws_port; verbose = verbose, rate_limit = ratelimit, server = wsserver,
                                                 reuseaddr = reuseaddr, http_kwargs...) do http::HTTP.Stream
       if HTTP.WebSockets.isupgrade(http.message)
         HTTP.WebSockets.upgrade(http) do ws
@@ -110,15 +113,15 @@ function up(port::Int,
   end
 
   command = () -> begin
-    HTTP.listen(parse(Sockets.IPAddr, host), port; verbose = verbose, rate_limit = ratelimit, server = server,
-                                    reuseaddr = reuseaddr, http_kwargs...) do http::HTTP.Stream
+    HTTP.listen!(parse(Sockets.IPAddr, host), port; verbose = verbose, rate_limit = ratelimit, server = server,
+                                    reuseaddr = reuseaddr, http_kwargs...) do stream::HTTP.Stream
       try
-        if Genie.config.websockets_server !== nothing && port === ws_port && HTTP.WebSockets.isupgrade(http.message)
-          HTTP.WebSockets.upgrade(http) do ws
-            setup_ws_handler(http, ws)
+        if Genie.config.websockets_server !== nothing && port === ws_port && HTTP.WebSockets.isupgrade(stream.message)
+          HTTP.WebSockets.upgrade(stream) do ws
+            setup_ws_handler(stream, ws)
           end
         else
-          setup_http_streamer(http)
+          setup_http_streamer(stream)
         end
       catch ex
         isa(ex, Base.IOError) || @error ex
@@ -127,18 +130,36 @@ function up(port::Int,
     end
   end
 
-  server_url = "http://$host:$port"
-
-  status = if async
-    print_server_status("Web Server starting at $server_url")
-    @async command()
-  else
-    print_server_status("Web Server starting at $server_url - press Ctrl/Cmd+C to stop the server.")
-    command()
+  server_url = "$protocol://$host:$port"
+  if ! isempty(query)
+    server_url *= ("?" * join(["$(k)=$(v)" for (k, v) in query], "&"))
   end
 
-  if status !== nothing && status.state === :runnable
-    new_server.webserver = status
+  if async
+    print_server_status("Web Server starting at $server_url")
+  else
+    print_server_status("Web Server starting at $server_url - press Ctrl/Cmd+C to stop the server.")
+  end
+  
+  listener = try
+    command()
+  catch
+    nothing
+  end
+  if !async && !isnothing(listener)
+    try
+      wait(listener)
+    catch
+      nothing
+    finally
+      close(listener)
+      # close the corresponding websocket server
+      new_server.websockets !== nothing && isopen(new_server.websockets) && close(new_server.websockets)
+    end
+  end
+
+  if listener !== nothing && isopen(listener)
+    new_server.webserver = listener
 
     try
       open_browser && openbrowser(server_url)
@@ -232,18 +253,19 @@ end
 Shuts down the servers optionally indicating which of the `webserver` and `websockets` servers to be stopped.
 It does not remove the servers from the `SERVERS` collection. Returns the collection.
 """
-function down(; webserver::Bool = true, websockets::Bool = true) :: Vector{ServersCollection}
+function down(; webserver::Bool = true, websockets::Bool = true, force::Bool = true) :: Vector{ServersCollection}
   for i in 1:length(SERVERS)
-    down(SERVERS[i]; webserver, websockets)
+    down(SERVERS[i]; webserver, websockets, force)
   end
 
   SERVERS
 end
 
 
-function down(server::ServersCollection; webserver::Bool = true, websockets::Bool = true) :: ServersCollection
-  webserver && (@async Base.throwto(server.webserver, InterruptException()))
-  isnothing(websockets) || (websockets && (@async Base.throwto(server.websockets, InterruptException())))
+function down(server::ServersCollection; webserver::Bool = true, websockets::Bool = true, force::Bool = true) :: ServersCollection
+  close_cmd = force ? forceclose : close
+  webserver && !isnothing(server.webserver) && isopen(server.webserver) && close_cmd(server.webserver)
+  websockets && !isnothing(server.websockets) && isopen(server.websockets) && close_cmd(server.websockets)
 
   server
 end
@@ -267,7 +289,7 @@ end
 
 Http server handler function - invoked when the server gets a request.
 """
-function handle_request(req::HTTP.Request, res::HTTP.Response) :: HTTP.Response
+function handle_request(req::HTTP.Request, res::HTTP.Response; stream::Union{HTTP.Stream,Nothing} = nothing) :: HTTP.Response
   try
     req = Genie.Headers.normalize_headers(req)
   catch ex
@@ -275,23 +297,40 @@ function handle_request(req::HTTP.Request, res::HTTP.Response) :: HTTP.Response
   end
 
   try
-    Genie.Headers.set_headers!(req, res, Genie.Router.route_request(req, res))
+    Genie.Headers.set_headers!(req, res, Genie.Router.route_request(req, res; stream))
   catch ex
     rethrow(ex)
   end
 end
 
 
-function setup_http_streamer(http::HTTP.Stream)
+function streamhandler(handler::Function)
+    return function(stream::HTTP.Stream)
+        request::HTTP.Request = stream.message
+        request.body = read(stream)
+
+        closeread(stream)
+        request.response::HTTP.Response = handler(request; stream)
+        request.response.request = request
+
+        startwrite(stream)
+        write(stream, request.response.body)
+
+        return
+    end
+end
+
+
+function setup_http_streamer(stream::HTTP.Stream)
   if Genie.config.features_peerinfo
     try
-      task_local_storage(:peer, Sockets.getpeername( HTTP.IOExtras.tcpsocket(HTTP.Streams.getrawstream(http)) ))
+      task_local_storage(:peer, Sockets.getpeername( HTTP.IOExtras.tcpsocket(HTTP.Streams.getrawstream(stream)) ))
     catch ex
       @error ex
     end
   end
 
-  HTTP.Handlers.streamhandler(setup_http_listener)(http)
+  streamhandler(setup_http_listener)(stream)
 end
 
 
@@ -300,9 +339,9 @@ end
 
 Configures the handler for the HTTP Request and handles errors.
 """
-function setup_http_listener(req::HTTP.Request, res::HTTP.Response = HTTP.Response()) :: HTTP.Response
+function setup_http_listener(req::HTTP.Request, res::HTTP.Response = HTTP.Response(); stream::Union{HTTP.Stream, Nothing} = nothing) :: HTTP.Response
   try
-    Distributed.@fetch handle_request(req, res)
+    Distributed.@fetch handle_request(req, res; stream)
   catch ex # ex is a Distributed.RemoteException
     if isa(ex, Distributed.RemoteException) &&
       hasfield(typeof(ex), :captured) && isa(ex.captured, Distributed.CapturedException) &&

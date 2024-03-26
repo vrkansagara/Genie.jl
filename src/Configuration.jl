@@ -228,6 +228,7 @@ Base.@kwdef mutable struct Settings
   webchannels_unsubscribe_channel::String             = "unsubscribe"
   webchannels_autosubscribe::Bool                     = true
   webchannels_eval_command::String                    = ">eval:"
+  webchannels_base64_marker::String                   = "base64:"
   webchannels_timeout::Int                            = 1_000
   webchannels_keepalive_frequency::Int                = 30_000 # 30 seconds
   webchannels_server_gone_alert_timeout::Int          = 10_000 # 10 seconds
@@ -247,6 +248,7 @@ Base.@kwdef mutable struct Settings
   html_parser_char_dot::String                        = "!"
   html_parser_char_column::String                     = "!"
   html_parser_char_dash::String                       = "__"
+  html_registered_tags_only::Bool                     = false
 
   features_peerinfo::Bool                             = false
 
@@ -264,6 +266,9 @@ Base.@kwdef mutable struct Settings
   watch_handlers::Dict{Any,Vector{Function}}          = Dict()
   watch_frequency::Int                                = 2_000 # 2 seconds
   watch_exceptions::Vector{String}                    = String["bin/", "build/", "sessions/", "Project.toml", "Manifest.toml"]
+
+  cdn_enabled::Bool                                   = true # if true, the CDN will be used for static assets in prod mode
+  cdn_url::String                                     = "https://cdn.statically.io/gh/GenieFramework" # the URL of the CDN
 end
 
 end

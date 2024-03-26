@@ -144,8 +144,10 @@ ispayload() = params()[:REQUEST].method in [POST, PUT, PATCH]
 
 First step in handling a request: sets up params collection, handles query vars, negotiates content.
 """
-function route_request(req::HTTP.Request, res::HTTP.Response) :: HTTP.Response
+function route_request(req::HTTP.Request, res::HTTP.Response; stream::Union{HTTP.Stream,Nothing} = nothing) :: HTTP.Response
   params = Params()
+
+  params.collection[:STREAM] = stream
 
   for f in unique(content_negotiation_hooks)
     req, res, params.collection = f(req, res, params.collection)
@@ -283,7 +285,7 @@ end
 
 Computes the name of a channel.
 """
-function channelname(params::Channel) :: Symbol
+function channelname(params::Union{Channel,String}) :: Symbol
   baptizer(params, String[])
 end
 
@@ -383,6 +385,17 @@ Removes the route with the corresponding name from the routes collection and ret
 function delete!(key::Symbol) :: Vector{Route}
   OrderedCollections.delete!(_routes, key)
   return routes()
+end
+
+
+"""
+    delete_channel!(channel_name::Symbol)
+
+Removes the channel with the corresponding name from the channels collection and returns the collection of remaining channels.
+"""
+function delete_channel!(key::Symbol) :: Vector{Channel}
+  OrderedCollections.delete!(_channels, key)
+  return channels()
 end
 
 

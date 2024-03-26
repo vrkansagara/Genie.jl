@@ -7,6 +7,7 @@ import Genie, Genie.Router
 import HTTP
 
 export getresponse, getheaders, setheaders, setheaders!, getstatus, setstatus, setstatus!, getbody, setbody, setbody!
+export @streamhandler, stream
 
 
 function getresponse() :: HTTP.Response
@@ -73,4 +74,74 @@ function setbody(body::String) :: HTTP.Response
   setbody!(getresponse(), body)
 end
 
+
+"""
+@streamhandler(body)
+
+Macro for defining a stream handler for a route.
+
+# Example
+
+```julia
+route("/test") do
+  @streamhandler begin
+        while true
+          stream("Hello")
+          sleep(1)
+        end
+    end
 end
+````
+"""
+macro streamhandler(body)
+  quote
+    Genie.HTTPUtils.HTTP.setheader(Genie.Router.params(:STREAM), "Content-Type" => "text/event-stream")
+    Genie.HTTPUtils.HTTP.setheader(Genie.Router.params(:STREAM), "Cache-Control" => "no-store")
+
+    if Genie.HTTPUtils.HTTP.method(Genie.Router.params(:STREAM).message) == "OPTIONS"
+      return nothing
+    end
+
+    response = try
+      $body
+    catch ex
+      @error ex
+    end
+
+    if response !== nothing
+      stream!(response.body |> String)
+    end
+
+    nothing
+  end |> esc
+end
+
+
+function stream!(message::String; eol::String = "\n\n") :: Nothing
+  Genie.HTTPUtils.HTTP.write(Genie.Router.params(:STREAM), message * eol)
+
+  nothing
+end
+function stream(data::String = ""; event::String = "", id::String = "", retry::Int = 0) :: Nothing
+  msg = ""
+  if ! isempty(data)
+    for line in split(data, "\n")
+      msg = "data: $line\n" * msg
+    end
+  end
+  if ! isempty(event)
+    msg = "event: $event\n" * msg
+  end
+  if ! isempty(id)
+    msg = "id: $id\n" * msg
+  end
+  if retry > 0
+    msg = "retry: $retry\n" * msg
+  end
+
+  stream!(msg * "\n"; eol = "")
+
+  nothing
+end
+
+end # module Responses

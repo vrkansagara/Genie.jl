@@ -121,6 +121,31 @@ function newSocketConnection(host = Genie.Settings.websockets_exposed_host) {
 Genie.WebChannels.initialize();
 Genie.WebChannels.socket = newSocketConnection();
 
+// --------------- Revivers ---------------
+
+Genie.Revivers = {};
+Genie.Revivers.pipeRevivers = (revivers) => (key, value) => revivers.reduce((v, f) => f(key, v), value);
+
+Genie.Revivers.rebuildReviver = function() {
+  Genie.Revivers.reviver = Genie.Revivers.pipeRevivers(Genie.Revivers.revivers)
+}
+
+Genie.Revivers.addReviver = function(reviver) {
+  Genie.Revivers.revivers.push(reviver)
+  Genie.Revivers.rebuildReviver()
+}
+
+Genie.Revivers.revive_undefined = function(key, value) {
+  if (value == '__undefined__') {
+    return undefined;
+  } else {
+    return value;
+  }
+}
+
+Genie.Revivers.revivers = [Genie.Revivers.revive_undefined]
+Genie.Revivers.rebuildReviver()
+
 window.addEventListener('beforeunload', _ => {
   if (isDev()) {
     console.info('Preparing to unload');
@@ -141,19 +166,18 @@ Genie.WebChannels.processingHandlers.push(event => {
 
 Genie.WebChannels.messageHandlers.push(event => {
   try {
-    event.data = event.data.trim();
+    let ed = event.data.trim();
 
-    if (event.data.startsWith('{') && event.data.endsWith('}')) {
-      window.parse_payload(JSON.parse(event.data, function (key, value) {
-        if (value == '__undefined__') {
-          return undefined;
-        } else {
-          return value;
-        }
-      }));
-    } else if (event.data.startsWith(Genie.Settings.webchannels_eval_command)) {
-      return Function('"use strict";return (' + event.data.substring(Genie.Settings.webchannels_eval_command.length).trim() + ')')();
-    } else if (event.data == 'Subscription: OK') {
+    // if payload is marked as base64 encoded, remove the marker and decode
+    if (ed.startsWith(Genie.Settings.webchannels_base64_marker)) {
+      ed = atob(ed.substring(Genie.Settings.webchannels_base64_marker.length).trim());
+    }
+
+    if (ed.startsWith('{') && ed.endsWith('}')) {
+      window.parse_payload(JSON.parse(ed, Genie.Revivers.reviver));
+    } else if (ed.startsWith(Genie.Settings.webchannels_eval_command)) {
+      return Function('"use strict";return (' + ed.substring(Genie.Settings.webchannels_eval_command.length).trim() + ')')();
+    } else if (ed == 'Subscription: OK') {
       window.subscription_ready();
     } else {
       window.process_payload(event);

@@ -5,6 +5,7 @@ module Assets
 
 import Genie, Genie.Configuration, Genie.Router, Genie.WebChannels, Genie.WebThreads
 import Genie.Renderer.Json
+import Pkg
 
 export include_asset, css_asset, js_asset, js_settings, css, js
 export embedded, channels_script, channels_support, webthreads_script, webthreads_support
@@ -12,6 +13,25 @@ export favicon_support
 
 
 ### PUBLIC ###
+
+"""
+    package_version(package::Union{Module,String}) :: String
+
+Returns the version of a package, or "master" if the package is not installed.
+
+### Example
+
+```julia
+
+julia> package_version("Genie.jl")
+"v0.23.0"
+"""
+function package_version(package::Union{Module,String}) :: String
+  isa(package, Module) && (package = String(nameof(package)))
+  endswith(package, ".jl") && (package = String(package[1:end-3]))
+  pkg_dict = filter(x -> x.second.name == package, Pkg.dependencies())
+  isempty(pkg_dict) ? "master" : ("v" * string(first(pkg_dict)[2].version))
+end
 
 """
     mutable struct AssetsConfig
@@ -22,7 +42,7 @@ add support for asset management for your package through Genie.Assets.
 Base.@kwdef mutable struct AssetsConfig
   host::String = Genie.config.base_path
   package::String = "Genie.jl"
-  version::String = "master"
+  version::String = package_version(package)
 end
 
 const assets_config = AssetsConfig()
@@ -31,7 +51,7 @@ function __init__()::Nothing
   # make sure the assets config is properly initialized
   assets_config.host = Genie.config.base_path
   assets_config.package = "Genie.jl"
-  assets_config.version = "master"
+  assets_config.version = package_version(assets_config.package)
 
   nothing
 end
@@ -231,6 +251,7 @@ function js_settings(channel::String = Genie.config.webchannels_default_route) :
     :webchannels_unsubscribe_channel  => Genie.config.webchannels_unsubscribe_channel,
     :webchannels_autosubscribe        => Genie.config.webchannels_autosubscribe,
     :webchannels_eval_command         => Genie.config.webchannels_eval_command,
+    :webchannels_base64_marker        => Genie.config.webchannels_base64_marker,
     :webchannels_timeout              => Genie.config.webchannels_timeout,
     :webchannels_keepalive_frequency  => Genie.config.webchannels_keepalive_frequency,
     :webchannels_server_gone_alert_timeout => Genie.config.webchannels_server_gone_alert_timeout,
@@ -307,7 +328,7 @@ function add_fileroute(assets_config::Genie.Assets.AssetsConfig, filename::Abstr
   basedir = pwd(),
   type::Union{Nothing, String} = nothing,
   content_type::Union{Nothing, Symbol} = nothing,
-  ext::Union{Nothing, String} = nothing, kwargs...)
+  ext::Union{Nothing, String} = nothing, named::Union{Symbol, Nothing} = nothing, kwargs...)
 
   file, ex = splitext(filename)
   ext = isnothing(ext) ? ex : ext
@@ -324,7 +345,7 @@ function add_fileroute(assets_config::Genie.Assets.AssetsConfig, filename::Abstr
     Symbol("*.*")
   end : content_type
 
-  Genie.Router.route(Genie.Assets.asset_path(assets_config, type; file, ext, kwargs...)) do
+  Genie.Router.route(Genie.Assets.asset_path(assets_config, type; file, ext, kwargs...); named) do
     Genie.Renderer.WebRenderable(
       Genie.Assets.embedded(Genie.Assets.asset_file(cwd=basedir; type, file)),
     content_type) |> Genie.Renderer.respond
@@ -367,9 +388,10 @@ function channels_subscribe(channel::AbstractString = Genie.config.webchannels_d
     "Subscription: OK"
   end
 
-  Router.channel("/$(channel)/$(Genie.config.webchannels_unsubscribe_channel)") do
+  Router.channel("/$(channel)/$(Genie.config.webchannels_unsubscribe_channel)", named = Symbol(channel)) do
     WebChannels.unsubscribe(Genie.Requests.wsclient(), channel)
     WebChannels.unsubscribe_disconnected_clients()
+    Genie.Router.delete_channel!(Symbol(channel))
 
     "Unsubscription: OK"
   end
@@ -457,9 +479,10 @@ function webthreads_subscribe(channel::String = Genie.config.webthreads_default_
     "Subscription: OK"
   end
 
-  Router.route("/$(channel)/$(Genie.config.webchannels_unsubscribe_channel)", method = Router.GET) do
+  Router.route("/$(channel)/$(Genie.config.webchannels_unsubscribe_channel)", method = Router.GET, named = Symbol(channel)) do
     WebThreads.unsubscribe(Genie.Requests.wtclient(), channel)
     WebThreads.unsubscribe_disconnected_clients()
+    Genie.Router.delete_channel!(Symbol(channel))
 
     "Unsubscription: OK"
   end
@@ -493,7 +516,7 @@ end
 
 function webthreads_route(channel::String = Genie.config.webthreads_default_route) :: Nothing
   if ! external_assets()
-    Router.route(webthreads_endpoint(channel)) do
+    Router.route(webthreads_endpoint()) do
       Genie.Renderer.Js.js(webthreads(channel))
     end
   end
@@ -504,7 +527,7 @@ end
 
 function webthreads_script_tag(channel::String = Genie.config.webthreads_default_route) :: String
   if ! external_assets()
-    Genie.Renderer.Html.script(src="$(Genie.config.base_path)$(webthreads_endpoint(channel)[2:end])")
+    Genie.Renderer.Html.script(src="$(Genie.config.base_path)$(webthreads_endpoint())")
   else
     Genie.Renderer.Html.script([webthreads(channel)])
   end
